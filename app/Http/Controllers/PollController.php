@@ -6,21 +6,22 @@ use Illuminate\Http\Request;
 use App\Models\Poll;
 use App\Models\Option;
 use App\Models\Question;
-use App\Models\Vote; // <-- Modèle Vote conservé
+use App\Models\Vote; 
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Auth; // <-- Import de Auth conservé
+use Illuminate\Support\Facades\Auth; 
 
 class PollController extends Controller
 {
-    // 1. Afficher tous les quiz (Avec vérification persistante en BDD)
+    // 1. Afficher TOUS les quiz de la communauté (Visibles par tout le monde)
     public function index()
     {
         $userId = Auth::id();
 
-        // On récupère les sondages en injectant une vérification en BDD
-        // pour savoir si l'utilisateur connecté a déjà voté dans chaque sondage
+        // On récupère ABSOLUMENT TOUS les sondages sans restriction de créateur
         $polls = Poll::withCount('questions')
             ->with(['questions.votes' => function($query) use ($userId) {
+                // On charge uniquement les votes de l'utilisateur connecté.
+                // Cela permet à la vue de savoir si LUI a répondu, tout en voyant les quiz des autres.
                 $query->where('user_id', $userId);
             }])
             ->orderBy('created_at', 'desc')
@@ -51,6 +52,8 @@ class PollController extends Controller
             $poll = Poll::create([
                 'title' => $validated['title'],
                 'description' => $validated['description'] ?? null,
+                // Si tu as un champ user_id dans ta table 'polls' pour savoir qui l'a créé, 
+                // tu peux l'ajouter ici : 'user_id' => Auth::id(),
             ]);
 
             foreach ($validated['questions'] as $qData) {
@@ -83,10 +86,9 @@ class PollController extends Controller
                 $query->where('poll_id', $poll->id);
             })->exists();
 
-        // Secours session (optionnel mais conservé pour éviter tout conflit de cache)
+        // Secours session
         $completedPolls = session()->get('completed_polls', []);
         
-        // Si l'utilisateur a voté en BDD OU possède le flag en session, on bloque
         $alreadyDone = $hasVotedInDatabase || in_array($poll->id, $completedPolls);
 
         return view('polls.show', compact('poll', 'alreadyDone'));
@@ -123,14 +125,12 @@ class PollController extends Controller
             foreach ($userAnswers as $questionId => $optionId) {
                 $option = Option::find($optionId);
                 if ($option) {
-                    // 1. Ancienne logique préservée (Incrémentation)
                     $option->increment('votes_count');
                     
                     if ($option->is_correct) {
                         $score++;
                     }
 
-                    // 2. Sauvegarde persistante définitive liée à l'ID utilisateur
                     if (Auth::check()) {
                         Vote::create([
                             'user_id'     => $userId,
@@ -142,7 +142,6 @@ class PollController extends Controller
             }
         });
 
-        // On garde l'enregistrement en session pour la fluidité immédiate après redirection
         session()->push('completed_polls', $poll->id);
 
         $perf = ($totalQuestions > 0) ? ($score / $totalQuestions) * 100 : 0;
@@ -155,12 +154,10 @@ class PollController extends Controller
     // 6. Page des résultats statistiques et nominatifs
     public function results(Poll $poll)
     {
-        // On recharge les relations en comptant dynamiquement le nombre de votes par option
         $poll->load(['questions.options' => function($query) {
             $query->withCount('votes');
         }]);
 
-        // On récupère tous les choix individuels triés par utilisateur pour ce sondage précis
         $userVotes = Vote::with(['user', 'question', 'option'])
             ->whereHas('question', function($query) use ($poll) {
                 $query->where('poll_id', $poll->id);
