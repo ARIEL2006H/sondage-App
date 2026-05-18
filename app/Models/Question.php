@@ -9,4 +9,8 @@ class Question extends Model
     protected $fillable = ['title', 'poll_id'];
     public function options() { return $this->hasMany(Option::class); }
 public function poll() { return $this->belongsTo(Poll::class); }
+public function votes()
+    {
+        return $this->hasMany(Vote::class);
+    }
 }

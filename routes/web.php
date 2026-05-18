@@ -32,6 +32,9 @@ Route::middleware('auth')->group(function () {
     Route::get('/polls', [PollController::class, 'index'])->name('polls.index');
     Route::get('/polls/{poll}', [PollController::class, 'show'])->name('polls.show');
     Route::post('/polls/{poll}/vote', [PollController::class, 'vote'])->name('polls.vote');
+    
+// Ajoute cette ligne parmi tes autres routes "polls"
+Route::get('/polls/{poll}/results', [PollController::class, 'results'])->name('polls.results');
 });
 
 require __DIR__.'/auth.php';

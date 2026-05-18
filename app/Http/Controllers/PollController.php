@@ -6,14 +6,26 @@ use Illuminate\Http\Request;
 use App\Models\Poll;
 use App\Models\Option;
 use App\Models\Question;
+use App\Models\Vote; // <-- Modèle Vote conservé
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth; // <-- Import de Auth conservé
 
 class PollController extends Controller
 {
-    // 1. Afficher tous les quiz
+    // 1. Afficher tous les quiz (Avec vérification persistante en BDD)
     public function index()
     {
-        $polls = Poll::withCount('questions')->latest()->get();
+        $userId = Auth::id();
+
+        // On récupère les sondages en injectant une vérification en BDD
+        // pour savoir si l'utilisateur connecté a déjà voté dans chaque sondage
+        $polls = Poll::withCount('questions')
+            ->with(['questions.votes' => function($query) use ($userId) {
+                $query->where('user_id', $userId);
+            }])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
         return view('polls.index', compact('polls'));
     }
 
@@ -59,24 +71,41 @@ class PollController extends Controller
         return redirect()->route('polls.index')->with('success', 'Félicitations ! Ton Quiz est prêt.');
     }
 
-    // 4. Afficher le quiz complet (avec vérification de session)
+    // 4. Afficher le quiz complet (Vérification via Base de données + Session en secours)
     public function show(Poll $poll)
     {
         $poll->load('questions.options');
+        $userId = Auth::id();
 
-        // On vérifie si l'ID de ce quiz est déjà dans le tableau "completed_polls" en session
+        // ÉTAPE SÉCURISÉE BDD : On cherche si un vote de cet utilisateur existe pour ce sondage précis
+        $hasVotedInDatabase = Vote::where('user_id', $userId)
+            ->whereHas('question', function ($query) use ($poll) {
+                $query->where('poll_id', $poll->id);
+            })->exists();
+
+        // Secours session (optionnel mais conservé pour éviter tout conflit de cache)
         $completedPolls = session()->get('completed_polls', []);
-        $alreadyDone = in_array($poll->id, $completedPolls);
+        
+        // Si l'utilisateur a voté en BDD OU possède le flag en session, on bloque
+        $alreadyDone = $hasVotedInDatabase || in_array($poll->id, $completedPolls);
 
         return view('polls.show', compact('poll', 'alreadyDone'));
     }
 
-    // 5. Action pour CALCULER LE SCORE et BLOQUER le quiz
+    // 5. Action pour CALCULER LE SCORE et BLOQUER le quiz (+ ENREGISTREMENT DES VOTES)
     public function vote(Request $request, Poll $poll)
     {
-        // Sécurité supplémentaire : si l'utilisateur essaie de forcer l'envoi
+        $userId = Auth::id();
+
+        // ÉTAPE SÉCURISÉE BDD : Double sécurité à la soumission
+        $hasVotedInDatabase = Vote::where('user_id', $userId)
+            ->whereHas('question', function ($query) use ($poll) {
+                $query->where('poll_id', $poll->id);
+            })->exists();
+
         $completedPolls = session()->get('completed_polls', []);
-        if (in_array($poll->id, $completedPolls)) {
+
+        if ($hasVotedInDatabase || in_array($poll->id, $completedPolls)) {
             return redirect()->route('polls.show', $poll->id)
                              ->with('error', 'Vous avez déjà soumis vos réponses.');
         }
@@ -90,17 +119,30 @@ class PollController extends Controller
         $score = 0;
         $totalQuestions = $poll->questions()->count();
 
-        foreach ($userAnswers as $questionId => $optionId) {
-            $option = Option::find($optionId);
-            if ($option) {
-                $option->increment('votes_count');
-                if ($option->is_correct) {
-                    $score++;
+        DB::transaction(function () use ($userAnswers, $poll, &$score, $userId) {
+            foreach ($userAnswers as $questionId => $optionId) {
+                $option = Option::find($optionId);
+                if ($option) {
+                    // 1. Ancienne logique préservée (Incrémentation)
+                    $option->increment('votes_count');
+                    
+                    if ($option->is_correct) {
+                        $score++;
+                    }
+
+                    // 2. Sauvegarde persistante définitive liée à l'ID utilisateur
+                    if (Auth::check()) {
+                        Vote::create([
+                            'user_id'     => $userId,
+                            'question_id' => $questionId,
+                            'option_id'   => $optionId
+                        ]);
+                    }
                 }
             }
-        }
+        });
 
-        // --- NOUVEAUTÉ : ON ENREGISTRE LA FIN DU QUIZ EN SESSION ---
+        // On garde l'enregistrement en session pour la fluidité immédiate après redirection
         session()->push('completed_polls', $poll->id);
 
         $perf = ($totalQuestions > 0) ? ($score / $totalQuestions) * 100 : 0;
@@ -108,5 +150,24 @@ class PollController extends Controller
 
         return redirect()->route('polls.show', $poll->id)
                          ->with('success', "Quiz terminé $emoji ! Votre score : $score / $totalQuestions.");
+    }
+
+    // 6. Page des résultats statistiques et nominatifs
+    public function results(Poll $poll)
+    {
+        // On recharge les relations en comptant dynamiquement le nombre de votes par option
+        $poll->load(['questions.options' => function($query) {
+            $query->withCount('votes');
+        }]);
+
+        // On récupère tous les choix individuels triés par utilisateur pour ce sondage précis
+        $userVotes = Vote::with(['user', 'question', 'option'])
+            ->whereHas('question', function($query) use ($poll) {
+                $query->where('poll_id', $poll->id);
+            })
+            ->get()
+            ->groupBy('user_id');
+
+        return view('polls.results', compact('poll', 'userVotes'));
     }
 }

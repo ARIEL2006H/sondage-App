@@ -6,6 +6,9 @@ use Illuminate\Database\Eloquent\Model;
 
 class Option extends Model
 {
+    
+    // Relation pour compter les votes reçus par cette option
+   
     public function votes() {
     return $this->hasMany(Vote::class);
 }
